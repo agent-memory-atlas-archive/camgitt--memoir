@@ -230,17 +230,20 @@ console.log(`\n${BOLD}${CYAN}deleteAccount: success does not claim Auth-user del
   try {
     const result = await deleteAccount(session);
     assert(result && result.authUserDeleted === false, 'success result sets authUserDeleted: false');
-    assert(result.localDataDeleted === true, 'success result reports local/cloud data deletion only');
+    assert(result && result.localDataDeleted === true, 'success result reports local/cloud data deletion only');
     assert(!calls.some(c => c.kind === 'auth-identity'), 'success path never calls Auth admin/user deletion');
     assert(!await fs.pathExists(AUTH_FILE), 'success path signs this device out locally');
 
     const objectCall = calls.find(c => c.kind === 'object');
     assert(!!objectCall, 'success path deletes storage objects');
-    assert(objectCall.url === `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}`,
+    assert(objectCall && objectCall.url === `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}`,
       'storage deletion uses the bucket endpoint, not the download URL');
-    const parsed = JSON.parse(objectCall.body);
-    assert(Array.isArray(parsed.prefixes) && parsed.prefixes[0] === backups[0].storage_path,
-      'storage deletion uses the validated prefixes JSON body');
+    let prefixesOk = false;
+    try {
+      const parsed = JSON.parse(objectCall?.body);
+      prefixesOk = Array.isArray(parsed.prefixes) && parsed.prefixes[0] === backups[0].storage_path;
+    } catch { prefixesOk = false; }
+    assert(prefixesOk, 'storage deletion uses the validated prefixes JSON body');
   } finally { restore(); }
 }
 
