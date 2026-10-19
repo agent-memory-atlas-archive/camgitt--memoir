@@ -27,7 +27,7 @@ This checklist separates what source code can prove from hosted/product gates th
 - [x] `npm run eval`
 - [x] `npm run test:packed`
 - [x] `npm audit --omit=dev`
-- [ ] CI green on Linux/macOS/Windows and supported Node matrix.
+- [x] CI green on Linux/macOS/Windows and supported Node matrix.
 - [x] Install the exact packed artifact in a clean temporary home and complete setup → remember → fresh session → recall → backup → restore.
 - [x] Verify the npm registry version and trusted-publisher workflow after release.
 
