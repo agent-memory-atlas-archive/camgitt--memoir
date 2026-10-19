@@ -1,3 +1,4 @@
+import { execFile } from 'child_process';
 import chalk from 'chalk';
 import boxen from 'boxen';
 import gradient from 'gradient-string';
@@ -18,13 +19,10 @@ async function createCheckoutSession(session) {
   return data.url;
 }
 
-// No shell. The URL comes from our own API, but `exec(\`open "${url}"\`)`
-// is still a shell string built from data — flagged (correctly) by the
-// agentscores.xyz scan as command injection, and one bad quote away from
-// being one. execFile passes the URL as a single argument; on Windows
-// rundll32's URL handler avoids cmd.exe parsing `&` inside the query string.
+// No shell interpolation: execFile passes the URL as a discrete argument
+// array; on Windows rundll32's URL handler avoids cmd.exe parsing `&` inside
+// the query string.
 function openUrl(url) {
-  const { execFile } = require('child_process');
   const platform = process.platform;
   const [cmd, args] = platform === 'darwin' ? ['open', [url]]
     : platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]]

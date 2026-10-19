@@ -19,11 +19,22 @@ const MCP_ENTRY = path.join(__dirname, 'src', 'mcp.js');
 
 /**
  * Create a fresh scratch HOME dir for a test run. Caller owns cleanup
- * (fs.remove(dir)) unless obtained implicitly via spawnMcpClient(), which
+ * (removeScratchHome(dir)) unless obtained implicitly via spawnMcpClient(), which
  * cleans up its own scratch home on close() when the caller didn't supply one.
  */
 export async function makeScratchHome(prefix = 'memoir-mcp-test-') {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+/**
+ * Remove a scratch HOME directory with retries so Windows handle release
+ * right after child process termination does not fail with EBUSY.
+ */
+export async function removeScratchHome(dir) {
+  if (!dir) return;
+  try {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch {}
 }
 
 /**
@@ -146,8 +157,20 @@ export async function spawnMcpClient({ scratchHome, env = {}, timeoutMs = 15000 
   }
 
   async function close() {
-    try { child.kill('SIGKILL'); } catch {}
-    if (ownsHome) { try { await fs.remove(home); } catch {} }
+    if (!exited && child.exitCode === null && child.signalCode === null) {
+      const waitExit = new Promise((resolve) => {
+        const timer = setTimeout(resolve, 2000);
+        const done = () => { clearTimeout(timer); resolve(); };
+        child.once('exit', done);
+        child.once('close', done);
+      });
+      try { child.stdin.end(); } catch {}
+      try { child.kill('SIGKILL'); } catch {}
+      await waitExit;
+    } else {
+      try { child.kill('SIGKILL'); } catch {}
+    }
+    if (ownsHome) await removeScratchHome(home);
   }
 
   return {

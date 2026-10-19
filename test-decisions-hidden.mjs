@@ -114,7 +114,7 @@ console.log(`\n${BOLD}${CYAN}why.js — whyCommand() CLI display excludes hidden
 console.log(`\n${BOLD}${CYAN}mcp.js — memoir_why tool excludes hidden:true (real stdio call)${RESET}\n`);
 
 {
-  const { spawnMcpClient, makeScratchHome } = await import('./test-mcp-helpers.mjs');
+  const { spawnMcpClient, makeScratchHome, removeScratchHome } = await import('./test-mcp-helpers.mjs');
   const scratchHome = await makeScratchHome();
   await fs.ensureDir(path.join(scratchHome, '.config', 'memoir'));
   const state = makeState([
@@ -134,7 +134,7 @@ console.log(`\n${BOLD}${CYAN}mcp.js — memoir_why tool excludes hidden:true (re
     err = e;
   } finally {
     await mcp.close();
-    await fs.remove(scratchHome);
+    await removeScratchHome(scratchHome);
   }
 
   assert(err === null, `memoir_why tool call succeeded${err ? ` (${err.message})` : ''}`);

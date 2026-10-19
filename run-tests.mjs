@@ -73,6 +73,8 @@ const suites = [
   { name: 'tidy/lean-memory (unit)', cmd: 'node', args: ['test-tidy.mjs'] },
   { name: 'encryption (unit)', cmd: 'node', args: ['test-encryption.mjs'] },
   { name: 'cloud (unit)', cmd: 'node', args: ['test-cloud.mjs'] },
+  { name: 'subscription fail-closed (unit)', cmd: 'node', args: ['test-subscription-fail-closed.mjs'] },
+  { name: 'account-deletion fail-closed (unit)', cmd: 'node', args: ['test-account-deletion-fail-closed.mjs'] },
   { name: 'secret-scan (unit)', cmd: 'node', args: ['test-secret-scan.mjs'] },
   { name: 'mcp-contract (unit)', cmd: 'node', args: ['test-mcp-contract.mjs'] },
   { name: 'session-lock (unit)', cmd: 'node', args: ['test-session-lock.mjs'] },
@@ -98,7 +100,8 @@ for (const s of suites) {
   }
   console.log(`\n═══ ${s.name} ═══`);
   // DO_NOT_TRACK so the suite (incl. e2e `memoir push` runs) never emits telemetry.
-  const r = spawnSync(s.cmd, s.args, { stdio: 'inherit', env: { ...process.env, DO_NOT_TRACK: '1' } });
+  // Ignore stdin so suites that exercise pushCommand never block on interactive TTY prompts.
+  const r = spawnSync(s.cmd, s.args, { stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, DO_NOT_TRACK: '1' } });
   results.push({ name: s.name, status: r.status === 0 ? 'pass' : 'fail', code: r.status });
 }
 
