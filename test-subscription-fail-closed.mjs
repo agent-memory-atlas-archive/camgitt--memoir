@@ -204,20 +204,19 @@ console.log(`\n${BOLD}${CYAN}verified plans still prune at the matching limit${R
   } finally { restore(); }
 }
 
-console.log(`\n${BOLD}${CYAN}cloud push source: no catch-as-Free before retention${RESET}\n`);
+console.log(`\n${BOLD}${CYAN}cloud push source: uploads backup and skips retention when plan lookup fails${RESET}\n`);
 
 {
   const cloudSrc = await fs.readFile(path.join(__dirname, 'src', 'commands', 'cloud.js'), 'utf8');
   const pushStart = cloudSrc.indexOf('export async function cloudPushCommand');
   const pushEnd = cloudSrc.indexOf('export async function cloudRestoreCommand');
   const pushSrc = pushStart >= 0 && pushEnd > pushStart ? cloudSrc.slice(pushStart, pushEnd) : '';
-  assert(pushSrc.includes('const sub = await getSubscription(session);'), 'cloudPushCommand awaits getSubscription before retention');
-  assert(pushSrc.includes('cleanupOldBackups(session, isPro)'), 'cloudPushCommand passes the verified isPro flag to cleanup');
+  assert(pushSrc.includes('const sub = await getSubscription(session);'), 'cloudPushCommand awaits getSubscription');
+  assert(pushSrc.includes('planVerified ? await cleanupOldBackups(session, isPro) : 0'), 'cloudPushCommand only runs cleanupOldBackups when planVerified is true');
+  assert(pushSrc.includes('if (planVerified && !isPro)'), 'cloudPushCommand only shows Free limit warning when planVerified is true');
   const afterLookup = pushSrc.slice(pushSrc.indexOf('getSubscription'));
-  const catchBeforeCleanup = afterLookup.indexOf('catch') !== -1
-    && afterLookup.indexOf('catch') < afterLookup.indexOf('cleanupOldBackups');
   const catchAsFree = /catch[\s\S]{0,200}(status:\s*['"]free['"]|isPro\s*=\s*false)/.test(afterLookup.slice(0, afterLookup.indexOf('cleanupOldBackups') + 1));
-  assert(!catchBeforeCleanup || !catchAsFree, 'cloudPushCommand does not catch a failed plan lookup as Free before cleanup');
+  assert(!catchAsFree, 'cloudPushCommand does not catch a failed plan lookup as Free before cleanup');
 }
 
 await fs.remove(scratch);

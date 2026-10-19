@@ -298,7 +298,7 @@ export async function restoreCommand(options = {}) {
 }
 
 async function restoreFromShare(options) {
-  const shareToken = encodeURIComponent(options.from);
+  const rawToken = String(options.from || '').trim();
 
   console.log();
   const spinner = ora({ text: chalk.gray('Fetching share link...'), spinner: 'dots' }).start();
@@ -307,14 +307,16 @@ async function restoreFromShare(options) {
   await fs.ensureDir(stagingDir);
 
   try {
-    // Fetch share metadata from Supabase
+    // Fetch share metadata via token-scoped RPC (shared_links table does not allow table-wide anonymous SELECT)
     const metaRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/shared_links?select=*&token=eq.${shareToken}&limit=1`,
+      `${SUPABASE_URL}/rest/v1/rpc/memoir_get_shared_link`,
       {
+        method: 'POST',
         headers: {
           'apikey': SUPABASE_ANON_KEY,
           'Content-Type': 'application/json',
         },
+        body: JSON.stringify({ link_token: rawToken }),
       }
     );
 
@@ -445,15 +447,15 @@ async function restoreFromShare(options) {
       await fs.remove(decryptedDir);
     }
 
-    // Increment use_count
+    // Increment use_count via token-scoped RPC
     try {
-      const patchHeaders = { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' };
-      if (session) patchHeaders['Authorization'] = `Bearer ${session.access_token}`;
+      const rpcHeaders = { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' };
+      if (session) rpcHeaders['Authorization'] = `Bearer ${session.access_token}`;
 
-      await fetch(`${SUPABASE_URL}/rest/v1/shared_links?token=eq.${shareToken}`, {
-        method: 'PATCH',
-        headers: patchHeaders,
-        body: JSON.stringify({ use_count: shareLink.use_count + 1 }),
+      await fetch(`${SUPABASE_URL}/rest/v1/rpc/memoir_consume_shared_link`, {
+        method: 'POST',
+        headers: rpcHeaders,
+        body: JSON.stringify({ link_token: rawToken }),
       });
     } catch {
       // Best-effort — don't fail restore if count update fails

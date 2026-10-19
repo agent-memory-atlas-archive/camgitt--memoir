@@ -21,25 +21,39 @@ async function supaFetch(endpoint, options = {}) {
   });
 }
 
+// GoTrue's REST API takes the post-email landing URL as a `redirect_to`
+// QUERY PARAM. `options.emailRedirectTo` / `options.redirectTo` in the JSON
+// body is supabase-js's client shape — sent raw it is silently ignored and
+// the email links fall back to the project's Site URL. Both URLs below must
+// also be on the Auth → URL Configuration → Redirect URLs allow-list.
 const CONFIRMED_URL = 'https://memoir.sh/confirmed';
 const RESET_URL = 'https://memoir.sh/reset-password';
 
 export async function signUp(email, password) {
-  const res = await supaFetch(`/auth/v1/signup?redirect_to=${encodeURIComponent(CONFIRMED_URL)}`, { method: 'POST', body: JSON.stringify({ email, password }) });
+  const res = await supaFetch(`/auth/v1/signup?redirect_to=${encodeURIComponent(CONFIRMED_URL)}`, {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error_description || data.msg || 'Sign up failed');
   return data;
 }
 
 export async function signIn(email, password) {
-  const res = await supaFetch('/auth/v1/token?grant_type=password', { method: 'POST', body: JSON.stringify({ email, password }) });
+  const res = await supaFetch('/auth/v1/token?grant_type=password', {
+    method: 'POST',
+    body: JSON.stringify({ email, password }),
+  });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error_description || data.msg || 'Sign in failed');
   return data;
 }
 
 export async function refreshSession(refreshToken) {
-  const res = await supaFetch('/auth/v1/token?grant_type=refresh_token', { method: 'POST', body: JSON.stringify({ refresh_token: refreshToken }) });
+  const res = await supaFetch('/auth/v1/token?grant_type=refresh_token', {
+    method: 'POST',
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error_description || data.msg || 'Token refresh failed');
   return data;
@@ -47,30 +61,58 @@ export async function refreshSession(refreshToken) {
 
 export async function saveSession(session) {
   await fs.ensureDir(configDir);
-  const payload = { access_token: session.access_token, refresh_token: session.refresh_token, expires_at: Date.now() + (session.expires_in * 1000), user: { id: session.user.id, email: session.user.email } };
+  const payload = {
+    access_token: session.access_token,
+    refresh_token: session.refresh_token,
+    expires_at: Date.now() + (session.expires_in * 1000),
+    user: {
+      id: session.user.id,
+      email: session.user.email,
+    },
+  };
   await fs.writeFile(AUTH_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
   return payload;
 }
 
 export async function getSession() {
   if (!await fs.pathExists(AUTH_FILE)) return null;
+
   const stored = await fs.readJson(AUTH_FILE);
+
+  // If token expires within 60 seconds, refresh
   if (stored.expires_at < Date.now() + 60000) {
-    try { return await saveSession(await refreshSession(stored.refresh_token)); }
-    catch { await fs.remove(AUTH_FILE); return null; }
+    try {
+      const refreshed = await refreshSession(stored.refresh_token);
+      return await saveSession(refreshed);
+    } catch {
+      // Refresh failed — session is dead
+      await fs.remove(AUTH_FILE);
+      return null;
+    }
   }
+
   return stored;
 }
 
-export async function logout() { if (await fs.pathExists(AUTH_FILE)) await fs.remove(AUTH_FILE); }
-export async function isLoggedIn() { return !!(await getSession()); }
+export async function logout() {
+  if (await fs.pathExists(AUTH_FILE)) {
+    await fs.remove(AUTH_FILE);
+  }
+}
+
+export async function isLoggedIn() {
+  const session = await getSession();
+  return !!session;
+}
 
 // A failed plan lookup is not evidence that a user is on Free. Callers use
 // this value to choose destructive retention limits, so fail closed instead of
 // silently downgrading a Pro account and pruning its history.
 export async function getSubscription(session) {
   const res = await supaFetch('/rest/v1/subscriptions?select=*&user_id=eq.' + encodeURIComponent(session.user.id), {
-    headers: { 'Authorization': `Bearer ${session.access_token}` },
+    headers: {
+      'Authorization': `Bearer ${session.access_token}`,
+    },
   });
   if (!res.ok) throw new Error(`Could not verify subscription (${res.status}). Existing backups were not pruned.`);
   const data = await res.json();
@@ -80,8 +122,14 @@ export async function getSubscription(session) {
 }
 
 export async function resetPassword(email) {
-  const res = await supaFetch(`/auth/v1/recover?redirect_to=${encodeURIComponent(RESET_URL)}`, { method: 'POST', body: JSON.stringify({ email }) });
-  if (!res.ok) { const data = await res.json(); throw new Error(data.error_description || data.msg || 'Password reset failed'); }
+  const res = await supaFetch(`/auth/v1/recover?redirect_to=${encodeURIComponent(RESET_URL)}`, {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(data.error_description || data.msg || 'Password reset failed');
+  }
 }
 
 async function requireDelete(res, label) {
@@ -91,27 +139,119 @@ async function requireDelete(res, label) {
   throw new Error(`${label} failed (${res.status})${detail ? ': ' + detail : ''}. Nothing else was reported as deleted; retry account deletion.`);
 }
 
+async function requireRowDelete(res, label, { expectedMinRows = 0 } = {}) {
+  await requireDelete(res, label);
+  if (res.status === 204) {
+    throw new Error(`${label} failed: server returned 204 without representation (check RLS DELETE policy). Nothing else was reported as deleted; retry account deletion.`);
+  }
+  let rows = [];
+  try {
+    rows = await res.json();
+  } catch {
+    rows = [];
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error(`${label} failed: unexpected response shape. Nothing else was reported as deleted; retry account deletion.`);
+  }
+  if (expectedMinRows > 0 && rows.length < expectedMinRows) {
+    throw new Error(`${label} failed: 0 rows removed (check RLS DELETE policy). Nothing else was reported as deleted; retry account deletion.`);
+  }
+  return rows;
+}
+
+async function verifyNoneRemaining(endpoint, headers, label) {
+  const checkRes = await fetch(`${SUPABASE_URL}${endpoint}`, { headers });
+  if (!checkRes.ok) {
+    throw new Error(`${label} verification failed (${checkRes.status}). Nothing else was reported as deleted; retry account deletion.`);
+  }
+  const remaining = await checkRes.json();
+  if (!Array.isArray(remaining) || remaining.length > 0) {
+    throw new Error(`${label} failed: 0 rows removed while account rows still exist (check RLS DELETE policy). Nothing else was reported as deleted; retry account deletion.`);
+  }
+}
+
 // Deletes the data the current user is authorized to delete. Auth-user removal
 // itself requires a privileged server-side endpoint and must never be attempted
 // with a service-role key from this CLI.
 export async function deleteAccount(session) {
-  const headers = { 'Authorization': `Bearer ${session.access_token}`, 'apikey': SUPABASE_ANON_KEY };
-  const backupsRes = await fetch(`${SUPABASE_URL}/rest/v1/backups?select=*&user_id=eq.${encodeURIComponent(session.user.id)}`, { headers });
-  if (!backupsRes.ok) throw new Error(`Could not enumerate backups (${backupsRes.status}); account deletion stopped safely.`);
+  const headers = {
+    'Authorization': `Bearer ${session.access_token}`,
+    'apikey': SUPABASE_ANON_KEY,
+  };
+  const deleteHeaders = {
+    ...headers,
+    'Prefer': 'return=representation',
+  };
+
+  const backupsRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/backups?select=*&user_id=eq.${encodeURIComponent(session.user.id)}`,
+    { headers }
+  );
+  if (!backupsRes.ok) {
+    throw new Error(`Could not enumerate backups (${backupsRes.status}); account deletion stopped safely.`);
+  }
   const backups = await backupsRes.json();
 
   for (const backup of backups) {
-    if (typeof backup.storage_path !== 'string' || !backup.storage_path.startsWith(session.user.id + '/')) throw new Error('Unsafe backup path; account deletion stopped.');
-    const object = await fetch(`${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}`, {
-      method: 'DELETE', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ prefixes: [backup.storage_path] }),
+    if (typeof backup.storage_path !== 'string' || !backup.storage_path.startsWith(session.user.id + '/')) {
+      throw new Error('Unsafe backup path; account deletion stopped.');
+    }
+    const objectRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}`, {
+      method: 'DELETE',
+      headers: {
+        ...headers,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ prefixes: [backup.storage_path] }),
     });
-    await requireDelete(object, 'Backup object deletion');
-    const row = await fetch(`${SUPABASE_URL}/rest/v1/backups?id=eq.${encodeURIComponent(backup.id)}`, { method: 'DELETE', headers });
-    await requireDelete(row, 'Backup metadata deletion');
+    await requireDelete(objectRes, 'Backup object deletion');
+
+    const rowRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/backups?id=eq.${encodeURIComponent(backup.id)}`,
+      { method: 'DELETE', headers: deleteHeaders }
+    );
+    await requireRowDelete(rowRes, 'Backup metadata deletion', { expectedMinRows: 1 });
   }
 
-  await requireDelete(await fetch(`${SUPABASE_URL}/rest/v1/shared_links?user_id=eq.${encodeURIComponent(session.user.id)}`, { method: 'DELETE', headers }), 'Shared-link deletion');
-  await requireDelete(await fetch(`${SUPABASE_URL}/rest/v1/subscriptions?user_id=eq.${encodeURIComponent(session.user.id)}`, { method: 'DELETE', headers }), 'Subscription deletion');
+  const sharedRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/shared_links?created_by=eq.${encodeURIComponent(session.user.id)}`,
+    { method: 'DELETE', headers: deleteHeaders }
+  );
+  const deletedLinks = await requireRowDelete(sharedRes, 'Shared-link deletion');
+  if (deletedLinks.length === 0) {
+    await verifyNoneRemaining(
+      `/rest/v1/shared_links?select=id&created_by=eq.${encodeURIComponent(session.user.id)}&limit=1`,
+      headers,
+      'Shared-link deletion'
+    );
+  }
+  for (const link of deletedLinks) {
+    if (typeof link?.backup_id === 'string' && link.backup_id.startsWith(session.user.id + '/')) {
+      const shareObjRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}`, {
+        method: 'DELETE',
+        headers: {
+          ...headers,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ prefixes: [link.backup_id] }),
+      });
+      await requireDelete(shareObjRes, 'Shared bundle object deletion');
+    }
+  }
+
+  const subRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/subscriptions?user_id=eq.${encodeURIComponent(session.user.id)}`,
+    { method: 'DELETE', headers: deleteHeaders }
+  );
+  const deletedSubs = await requireRowDelete(subRes, 'Subscription deletion');
+  if (deletedSubs.length === 0) {
+    await verifyNoneRemaining(
+      `/rest/v1/subscriptions?select=user_id&user_id=eq.${encodeURIComponent(session.user.id)}&limit=1`,
+      headers,
+      'Subscription deletion'
+    );
+  }
+
   await logout();
   return { localDataDeleted: true, authUserDeleted: false };
 }

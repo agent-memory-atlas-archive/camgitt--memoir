@@ -72,15 +72,52 @@ async function seedAuthFile() {
   });
 }
 
+const TABLE_COLUMNS = {
+  backups: new Set(['id', 'user_id', 'version', 'storage_path', 'size_bytes', 'file_count', 'tools', 'machine_name', 'created_at']),
+  shared_links: new Set(['id', 'token', 'backup_id', 'created_by', 'tools', 'size_bytes', 'expires_at', 'max_uses', 'use_count', 'created_at']),
+  subscriptions: new Set(['user_id', 'status', 'stripe_customer_id', 'stripe_subscription_id', 'current_period_end', 'created_at']),
+};
+
+function validatePostgrestColumns(urlStr) {
+  const parsed = new URL(urlStr);
+  const match = parsed.pathname.match(/\/rest\/v1\/(backups|shared_links|subscriptions)$/);
+  if (!match) return null;
+  const table = match[1];
+  const allowed = TABLE_COLUMNS[table];
+  for (const [key] of parsed.searchParams.entries()) {
+    if (key === 'select' || key === 'limit' || key === 'order' || key === 'offset') continue;
+    if (!allowed.has(key)) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          code: '42703',
+          details: null,
+          hint: null,
+          message: `column ${table}.${key} does not exist`,
+        },
+      };
+    }
+  }
+  return null;
+}
+
 function classify(url, method) {
   const u = String(url);
   if (method === 'GET' && u.includes('/rest/v1/backups') && u.includes('select=')) return 'list';
+  if (method === 'GET' && u.includes('/rest/v1/shared_links')) return 'shared-check';
+  if (method === 'GET' && u.includes('/rest/v1/subscriptions')) return 'subscription-check';
   if (method === 'DELETE' && u.includes(`/storage/v1/object/${STORAGE_BUCKET}`)) return 'object';
   if (method === 'DELETE' && u.includes('/rest/v1/backups?id=eq.')) return 'row';
   if (method === 'DELETE' && u.includes('/rest/v1/shared_links')) return 'shared';
   if (method === 'DELETE' && u.includes('/rest/v1/subscriptions')) return 'subscription';
   if (u.includes('/auth/v1/admin') || (method === 'DELETE' && u.includes('/auth/v1/'))) return 'auth-identity';
   return 'other';
+}
+
+function hasPreferRepresentation(headers = {}) {
+  const prefer = headers.Prefer || headers.prefer || '';
+  return String(prefer).includes('return=representation');
 }
 
 function installDeleteStub(handler) {
@@ -91,6 +128,8 @@ function installDeleteStub(handler) {
     const kind = classify(url, method);
     const entry = { method, url: String(url), kind, body: options.body || null, headers: options.headers || {} };
     calls.push(entry);
+    const schemaErr = validatePostgrestColumns(String(url));
+    if (schemaErr) return jsonRes(schemaErr);
     return handler(entry, jsonRes);
   };
   return { calls, restore: () => { globalThis.fetch = original; } };
@@ -115,22 +154,57 @@ function defaultHandler(failKind, failStatus = 500) {
       if (failKind === 'object-second' && objectDeletes === 2) {
         return respond({ ok: false, status: failStatus, body: 'object delete failed' });
       }
-      return respond({ ok: true, status: 200, body: '' });
+      return respond({ ok: true, status: 200, body: [{ name: 'deleted' }] });
     }
     if (entry.kind === 'row') {
       rowDeletes += 1;
       if (failKind === 'row' && rowDeletes === 1) {
         return respond({ ok: false, status: failStatus, body: 'row delete failed' });
       }
-      return respond({ ok: true, status: 200, body: '' });
+      if (failKind === 'row-rls-204' && rowDeletes === 1) {
+        return respond({ ok: true, status: 204, body: '' });
+      }
+      if (failKind === 'row-rls-empty' && rowDeletes === 1) {
+        return respond({ ok: true, status: 200, body: [] });
+      }
+      if (!hasPreferRepresentation(entry.headers)) {
+        return respond({ ok: true, status: 204, body: '' });
+      }
+      return respond({ ok: true, status: 200, body: [backups[rowDeletes - 1] || backups[0]] });
     }
     if (entry.kind === 'shared') {
       if (failKind === 'shared') return respond({ ok: false, status: failStatus, body: 'shared-link delete failed' });
-      return respond({ ok: true, status: 200, body: '' });
+      if (failKind === 'shared-rls-204') return respond({ ok: true, status: 204, body: '' });
+      if (failKind === 'shared-rls-empty') return respond({ ok: true, status: 200, body: [] });
+      if (!hasPreferRepresentation(entry.headers)) {
+        return respond({ ok: true, status: 204, body: '' });
+      }
+      return respond({
+        ok: true,
+        status: 200,
+        body: [{ id: 'share-1', created_by: session.user.id, backup_id: `${session.user.id}/shares/share-1.gz` }],
+      });
+    }
+    if (entry.kind === 'shared-check') {
+      if (failKind === 'shared-rls-empty') {
+        return respond({ ok: true, status: 200, body: [{ id: 'share-1' }] });
+      }
+      return respond({ ok: true, status: 200, body: [] });
     }
     if (entry.kind === 'subscription') {
       if (failKind === 'subscription') return respond({ ok: false, status: failStatus, body: 'subscription delete failed' });
-      return respond({ ok: true, status: 200, body: '' });
+      if (failKind === 'subscription-rls-204') return respond({ ok: true, status: 204, body: '' });
+      if (failKind === 'subscription-rls-empty') return respond({ ok: true, status: 200, body: [] });
+      if (!hasPreferRepresentation(entry.headers)) {
+        return respond({ ok: true, status: 204, body: '' });
+      }
+      return respond({ ok: true, status: 200, body: [{ user_id: session.user.id, status: 'free' }] });
+    }
+    if (entry.kind === 'subscription-check') {
+      if (failKind === 'subscription-rls-empty') {
+        return respond({ ok: true, status: 200, body: [{ user_id: session.user.id }] });
+      }
+      return respond({ ok: true, status: 200, body: [] });
     }
     throw new Error(`Unexpected fetch in test: ${entry.method} ${entry.url}`);
   };
@@ -180,6 +254,38 @@ for (const stage of STAGES) {
     }
     assert(!calls.some(c => c.kind === 'auth-identity'), `${stage.name}: does not attempt Auth-user deletion`);
     assert(String(err?.message || '').includes(String(stage.failStatus)), `${stage.name}: error names HTTP ${stage.failStatus}`);
+  } finally { restore(); }
+}
+
+console.log(`\n${BOLD}${CYAN}deleteAccount: schema validation & silent RLS 0-row failures${RESET}\n`);
+
+{
+  // Verify the fake PostgREST validator rejects unknown columns with 400 42703
+  const badCol = validatePostgrestColumns(`${SUPABASE_URL}/rest/v1/shared_links?user_id=eq.user-123`);
+  assert(badCol && badCol.status === 400 && badCol.body.code === '42703',
+    'fake PostgREST rejects shared_links?user_id=eq.* with 400 42703');
+  const goodCol = validatePostgrestColumns(`${SUPABASE_URL}/rest/v1/shared_links?created_by=eq.user-123`);
+  assert(goodCol === null, 'fake PostgREST accepts shared_links?created_by=eq.*');
+}
+
+const RLS_ZERO_ROW_CASES = [
+  { failKind: 'row-rls-204', name: 'backup row DELETE returning 204 without representation' },
+  { failKind: 'row-rls-empty', name: 'backup row DELETE returning 200 [] (0 rows removed under RLS)' },
+  { failKind: 'shared-rls-204', name: 'shared_links DELETE returning 204 without representation' },
+  { failKind: 'shared-rls-empty', name: 'shared_links DELETE returning 200 [] while row still exists under RLS' },
+  { failKind: 'subscription-rls-204', name: 'subscriptions DELETE returning 204 without representation' },
+  { failKind: 'subscription-rls-empty', name: 'subscriptions DELETE returning 200 [] while row still exists under RLS' },
+];
+
+for (const rlsCase of RLS_ZERO_ROW_CASES) {
+  await seedAuthFile();
+  const { restore } = installDeleteStub(defaultHandler(rlsCase.failKind));
+  try {
+    let err = null;
+    try { await deleteAccount(session); } catch (e) { err = e; }
+    assert(!!err, `${rlsCase.name}: throws`);
+    assert(/204|0 rows removed/i.test(String(err?.message || '')), `${rlsCase.name}: error explains missing representation or 0 rows removed`);
+    assert(await fs.pathExists(AUTH_FILE), `${rlsCase.name}: local session is retained`);
   } finally { restore(); }
 }
 
@@ -234,8 +340,13 @@ console.log(`\n${BOLD}${CYAN}deleteAccount: success does not claim Auth-user del
     assert(!calls.some(c => c.kind === 'auth-identity'), 'success path never calls Auth admin/user deletion');
     assert(!await fs.pathExists(AUTH_FILE), 'success path signs this device out locally');
 
-    const objectCall = calls.find(c => c.kind === 'object');
-    assert(!!objectCall, 'success path deletes storage objects');
+    const sharedCall = calls.find(c => c.kind === 'shared');
+    assert(sharedCall && sharedCall.url.includes('created_by=eq.'),
+      'shared_links deletion filters by created_by (not non-existent user_id)');
+
+    const objectCalls = calls.filter(c => c.kind === 'object');
+    assert(objectCalls.length === 3, 'success path deletes both backup objects and shared bundle object');
+    const objectCall = objectCalls[0];
     assert(objectCall && objectCall.url === `${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}`,
       'storage deletion uses the bucket endpoint, not the download URL');
     let prefixesOk = false;
@@ -256,8 +367,8 @@ console.log(`\n${BOLD}${CYAN}deleteAccountCommand: no false success message${RES
     const output = await captureLogs(() => deleteAccountCommand({ confirm: true }));
     assert(/authentication identity may still exist/i.test(stripAnsi(output)),
       'success output warns that the Auth identity may still exist');
-    assert(/hosted account-deletion service/i.test(stripAnsi(output)),
-      'success output points at the hosted Auth-deletion service');
+    assert(!/hosted account-deletion service/i.test(stripAnsi(output)),
+      'success output does not claim a non-existent hosted account-deletion service');
     assert(!claimsAuthIdentityDeleted(output),
       'success output does not claim the Auth identity was deleted');
     assert(!/✔\s*Account deleted\.?/i.test(stripAnsi(output)),

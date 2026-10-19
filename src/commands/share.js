@@ -89,7 +89,7 @@ export async function shareCommand(options = {}) {
     const gzipped = await bundleDir(encryptedDir);
 
     const shareToken = crypto.randomUUID();
-    const storagePath = `shares/${session.user.id}/${shareToken}.gz`;
+    const storagePath = `${session.user.id}/shares/${shareToken}.gz`;
 
     const uploadRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${STORAGE_BUCKET}/${storagePath}`, {
       method: 'POST',

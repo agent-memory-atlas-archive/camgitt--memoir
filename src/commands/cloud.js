@@ -26,11 +26,20 @@ export async function cloudPushCommand(options = {}) {
     throw new Error('Cloud login required');
   }
 
-  const sub = await getSubscription(session);
-  const isPro = sub.status === 'pro';
+  let isPro = false;
+  let planVerified = false;
+  try {
+    const sub = await getSubscription(session);
+    isPro = sub.status === 'pro';
+    planVerified = true;
+  } catch {
+    // If plan lookup fails, still upload the new backup and skip retention
+    // pruning below rather than aborting the backup or assuming Free.
+    planVerified = false;
+  }
 
-  // Check backup count for free users
-  if (!isPro) {
+  // Check backup count for verified free users
+  if (planVerified && !isPro) {
     const existing = await listBackups(session);
     if (existing.length >= MAX_BACKUPS_FREE) {
       console.log('\n' + boxen(
@@ -75,8 +84,8 @@ export async function cloudPushCommand(options = {}) {
 
     const backup = await uploadBackup(stagingDir, session, toolResults);
 
-    // Cleanup old backups
-    const deleted = await cleanupOldBackups(session, isPro);
+    // Cleanup old backups only when the subscription plan was verified
+    const deleted = planVerified ? await cleanupOldBackups(session, isPro) : 0;
 
     spinner.stop();
 

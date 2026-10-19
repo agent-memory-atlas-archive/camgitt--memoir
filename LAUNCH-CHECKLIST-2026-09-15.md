@@ -12,6 +12,16 @@ This checklist separates what source code can prove from hosted/product gates th
 - [x] Add regression tests that fail each account-data deletion stage and verify no false success message.
 - [ ] Add a privileged hosted endpoint for complete Auth-user deletion, with reauthentication and an auditable retryable workflow.
 
+### Found 2026-10-18 (review of 3.17.2–3.17.3, checked against production)
+
+- [x] **Account-data deletion always fails in production.** `deleteAccount` deletes `shared_links` by `user_id`, but that column does not exist (it is `created_by`). PostgREST returns 400 `42703 column shared_links.user_id does not exist`, so every run deletes all backups, then stops with "Deletion incomplete" and never signs out. Retrying fails the same way.
+- [x] `shared_links` and `subscriptions` have no DELETE policy, so even with the right column those deletes return 204 with 0 rows removed. Use `Prefer: return=representation` and check the row count, or move these steps server-side.
+- [x] The deletion test fakes 204 for a request production rejects with 400. Fake the real PostgREST responses (400 unknown column, 204 with 0 rows under RLS).
+- [x] The deletion success message points to "the hosted account-deletion service". No such function exists (production functions: `track`, `stripe-checkout`, `stripe-webhook`).
+- [x] `memoir cloud push` aborts the whole backup when the plan lookup fails. Safer: upload the backup, skip only the pruning.
+- [x] `shared_links` policies: anyone can read every row, and "Anyone can increment use count" lets anyone UPDATE any column of any row. `memoir share` uploads to `shares/<uid>/…`, which the storage INSERT policy appears to reject (first folder must be the uid). 0 shared links exist.
+- [x] `src/cloud/auth.js` and `src/commands/login.js` were collapsed into very long single lines, and the comment explaining why GoTrue needs `redirect_to` as a query parameter (the 3.12.0 fix) was deleted. Restore the comment.
+
 ## P0 — cloud transaction recovery
 
 - [ ] Give each logical cloud push a persistent operation/idempotency ID.
