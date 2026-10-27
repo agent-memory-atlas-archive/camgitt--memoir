@@ -4,7 +4,7 @@ import boxen from 'boxen';
 import gradient from 'gradient-string';
 import ora from 'ora';
 import { getSession, getSubscription, supaFetch } from '../cloud/auth.js';
-import { SUPABASE_URL } from '../cloud/constants.js';
+import { SUPABASE_URL, MAX_BACKUPS_FREE, MAX_BACKUPS_PRO } from '../cloud/constants.js';
 
 async function createCheckoutSession(session) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/stripe-checkout`, {
@@ -57,7 +57,7 @@ export async function upgradeCommand() {
 
   const freeLabel = currentPlan === 'free' ? 'Free (current)' : 'Free';
   const proLabel = currentPlan === 'pro' ? 'Pro (current)' : 'Pro $15/mo';
-  const teamsLabel = 'Teams $29/seat';
+  const teamsLabel = 'Teams (coming soon)';
 
   const header =
     pad(chalk.bold.white(freeLabel), col1) +
@@ -67,12 +67,12 @@ export async function upgradeCommand() {
   const sep = chalk.gray('─'.repeat(col1 + col2 + 18));
 
   const rows = [
-    [chalk.gray('10 cloud backups'),   chalk.white('100 backups'),        chalk.white('100 backups')],
-    [chalk.gray('Local only'),        chalk.white('Unlimited machines'), chalk.white('Shared team context')],
-    [chalk.gray('Manual snapshots'),  chalk.white('Auto snapshots'),     chalk.white('Team dashboard')],
-    [chalk.gray('Community support'), chalk.white('Priority support'),   chalk.white('Audit log')],
-    [chalk.gray('—'),                 chalk.white('E2E encryption'),     chalk.white('SSO & RBAC')],
-    [chalk.gray('—'),                 chalk.white('Version history'),    chalk.white('Priority onboarding')],
+    [chalk.gray(`${MAX_BACKUPS_FREE} retained backups`), chalk.white(`${MAX_BACKUPS_PRO} retained backups`), chalk.white(`${MAX_BACKUPS_PRO} retained backups`)],
+    [chalk.gray('Community support'),  chalk.white('Sync across machines'), chalk.white('Shared team context')],
+    [chalk.white('E2E encryption'),    chalk.white('E2E encryption'),       chalk.white('E2E encryption')],
+    [chalk.gray('—'),                  chalk.gray('—'),                    chalk.white('Team dashboard')],
+    [chalk.gray('—'),                  chalk.gray('—'),                    chalk.white('Audit log')],
+    [chalk.gray('—'),                  chalk.gray('—'),                    chalk.white('SSO & RBAC')],
   ];
 
   const tableRows = rows.map(([a, b, c]) =>

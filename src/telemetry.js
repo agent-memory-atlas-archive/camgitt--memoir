@@ -1,11 +1,12 @@
-// Anonymous, opt-out usage telemetry.
+// Anonymous, opt-in usage telemetry.
 //
 // Fire-and-forget POST to PostHog's capture endpoint — no SDK, no batching/flush
-// problem for a short-lived CLI, and a HARD NO-OP unless a project key is set.
-// Honors DO_NOT_TRACK, CI, and `memoir telemetry off`. We NEVER send PII or any
-// memory contents — only an anonymous install UUID, the event name, the OS, and
-// the CLI version. All output goes to stderr so it can never corrupt the MCP
-// stdio protocol (which speaks JSON-RPC over stdout).
+// problem for a short-lived CLI, and a HARD NO-OP unless a project key is set
+// AND the user has explicitly opted in. Honors DO_NOT_TRACK, CI,
+// MEMOIR_TELEMETRY=0/off/false, and `memoir telemetry off`. We NEVER send PII
+// or any memory contents — only an anonymous install UUID, the event name, the
+// OS, and the CLI version. All output goes to stderr so it can never corrupt
+// the MCP stdio protocol (which speaks JSON-RPC over stdout).
 import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
@@ -17,35 +18,68 @@ const VERSION = (() => {
   try { return require('../package.json').version; } catch { return 'unknown'; }
 })();
 
-// PostHog PROJECT API key (phc_…). This is a PUBLIC client key — safe to ship in
-// the package, same model as posthog-js in a web app. Set MEMOIR_POSTHOG_KEY or
-// paste the project key here. Empty → telemetry is a silent no-op.
-const POSTHOG_KEY = process.env.MEMOIR_POSTHOG_KEY || 'phc_vS7ZKfmZAcGnaCE7Zt4hvwFioJBs6jr8gutyapDpqFXW';
+// PostHog PROJECT API key (phc_…). PUBLIC client key — same model as posthog-js.
+// Owner: rotating the project is a one-line change of POSTHOG_PROJECT_KEY (and
+// retiring the old PostHog project). MEMOIR_POSTHOG_KEY overrides at runtime.
+// Empty → telemetry is a silent no-op.
+export const POSTHOG_PROJECT_KEY = 'phc_vS7ZKfmZAcGnaCE7Zt4hvwFioJBs6jr8gutyapDpqFXW';
+const POSTHOG_KEY = process.env.MEMOIR_POSTHOG_KEY || POSTHOG_PROJECT_KEY;
 const POSTHOG_HOST = process.env.MEMOIR_POSTHOG_HOST || 'https://us.i.posthog.com';
 
 const CONFIG_DIR = process.platform === 'win32'
   ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'memoir')
   : path.join(os.homedir(), '.config', 'memoir');
 const ID_FILE = path.join(CONFIG_DIR, 'telemetry-id');
+const OPTIN_FILE = path.join(CONFIG_DIR, 'telemetry-on');
 const OPTOUT_FILE = path.join(CONFIG_DIR, 'telemetry-off');
 const DISCLOSED_FILE = path.join(CONFIG_DIR, 'telemetry-disclosed');
 
+function envFlag() {
+  return String(process.env.MEMOIR_TELEMETRY || '').toLowerCase();
+}
+
+function envForcesOff() {
+  if (['1', 'true'].includes(process.env.DO_NOT_TRACK)) return 'DO_NOT_TRACK is set';
+  if (process.env.CI) return 'running in CI';
+  if (['0', 'off', 'false'].includes(envFlag())) return 'MEMOIR_TELEMETRY is off';
+  return null;
+}
+
+function fileOptedOut() {
+  try { return fs.existsSync(OPTOUT_FILE); } catch { return false; }
+}
+
+function fileOptedIn() {
+  try { return fs.existsSync(OPTIN_FILE); } catch { return false; }
+}
+
+function envForcesOn() {
+  return ['1', 'on', 'true'].includes(envFlag());
+}
+
 export function isEnabled() {
   if (!POSTHOG_KEY) return false;                                   // no key → no-op
-  if (['1', 'true'].includes(process.env.DO_NOT_TRACK)) return false;
-  if (process.env.CI) return false;                                 // never track CI
-  if (['0', 'off', 'false'].includes(process.env.MEMOIR_TELEMETRY)) return false;
-  try { if (fs.existsSync(OPTOUT_FILE)) return false; } catch {}
-  return true;
+  if (envForcesOff()) return false;
+  if (fileOptedOut()) return false;
+  return envForcesOn() || fileOptedIn();                            // default off
+}
+
+function discardStaleIdentity() {
+  try { fs.removeSync(ID_FILE); } catch {}
+  try { fs.removeSync(DISCLOSED_FILE); } catch {}
+}
+
+function mintInstallId() {
+  const id = randomUUID();
+  try { fs.ensureDirSync(CONFIG_DIR); fs.writeFileSync(ID_FILE, id); } catch {}
+  return id;
 }
 
 function getInstallId() {
   try {
     if (fs.existsSync(ID_FILE)) return fs.readFileSync(ID_FILE, 'utf8').trim();
   } catch {}
-  const id = randomUUID();
-  try { fs.ensureDirSync(CONFIG_DIR); fs.writeFileSync(ID_FILE, id); } catch {}
-  return id;
+  return mintInstallId();
 }
 
 function discloseOnce() {
@@ -54,8 +88,8 @@ function discloseOnce() {
     fs.ensureDirSync(CONFIG_DIR);
     fs.writeFileSync(DISCLOSED_FILE, new Date().toISOString());
     process.stderr.write(
-      '\n  memoir collects anonymous, no-PII usage stats to improve the tool.\n' +
-      '  Opt out anytime: `memoir telemetry off` (or set DO_NOT_TRACK=1).\n\n'
+      '\n  memoir sends anonymous, no-PII usage stats because telemetry is opted in.\n' +
+      '  Disable anytime: `memoir telemetry off` (or set DO_NOT_TRACK=1).\n\n'
     );
   } catch {}
 }
@@ -64,7 +98,10 @@ function discloseOnce() {
 // touches stdout. Callers may await (CLI) or not (MCP) — both are safe.
 export async function capture(event, properties = {}) {
   try {
-    if (!isEnabled()) return;
+    if (!isEnabled()) {
+      discardStaleIdentity();
+      return;
+    }
     discloseOnce();
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 1500);
@@ -90,19 +127,44 @@ export async function capture(event, properties = {}) {
 export async function telemetryCommand(action = 'status') {
   const a = String(action).toLowerCase();
   if (a === 'off') {
-    try { await fs.ensureDir(CONFIG_DIR); await fs.writeFile(OPTOUT_FILE, '1'); } catch {}
+    try {
+      await fs.ensureDir(CONFIG_DIR);
+      await fs.writeFile(OPTOUT_FILE, '1');
+      await fs.remove(OPTIN_FILE);
+    } catch {}
+    discardStaleIdentity();
     console.log('  Telemetry disabled. memoir will not send any usage events.');
     return;
   }
   if (a === 'on') {
-    try { await fs.remove(OPTOUT_FILE); } catch {}
-    console.log('  Telemetry enabled (anonymous, no PII).');
+    try {
+      await fs.ensureDir(CONFIG_DIR);
+      await fs.writeFile(OPTIN_FILE, '1');
+      await fs.remove(OPTOUT_FILE);
+    } catch {}
+    discardStaleIdentity();
+    mintInstallId();
+    const blocked = envForcesOff();
+    if (blocked) {
+      console.log(`  Telemetry opted in, but currently OFF — ${blocked}.`);
+    } else {
+      console.log('  Telemetry enabled (anonymous, no PII). Disable with `memoir telemetry off`.');
+    }
     return;
   }
   // status
   const reason = !POSTHOG_KEY ? 'no project key configured'
-    : ['1', 'true'].includes(process.env.DO_NOT_TRACK) ? 'DO_NOT_TRACK is set'
-    : process.env.CI ? 'running in CI'
-    : (() => { try { return fs.existsSync(OPTOUT_FILE) ? 'opted out (`memoir telemetry off`)' : null; } catch { return null; } })();
-  console.log(reason ? `  Telemetry: OFF — ${reason}.` : '  Telemetry: ON — anonymous usage events (no PII). Disable with `memoir telemetry off`.');
+    : envForcesOff()
+    || (fileOptedOut() ? 'opted out (`memoir telemetry off`)' : null);
+  if (reason) {
+    discardStaleIdentity();
+    console.log(`  Telemetry: OFF — ${reason}.`);
+    return;
+  }
+  if (envForcesOn() || fileOptedIn()) {
+    console.log('  Telemetry: ON — anonymous usage events (no PII). Disable with `memoir telemetry off`.');
+    return;
+  }
+  discardStaleIdentity();
+  console.log('  Telemetry: OFF — off by default. Enable with `memoir telemetry on`.');
 }

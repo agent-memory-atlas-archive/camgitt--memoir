@@ -161,7 +161,7 @@ program
   .command('share')
   .description('Share your AI memory via a secure link')
   .option('--only <tools>', 'Only share specific tools (comma-separated)')
-  .option('--expires <hours>', 'Link expiry in hours (default: 24)')
+  .option('--expires <hours>', 'Link expiry in hours (default: 24, max: 720 / 30 days)')
   .option('--uses <number>', 'Max number of uses (default: 5)')
   .action(async (options) => {
     try {
@@ -576,7 +576,7 @@ const account = program.command('account').description('Manage your memoir accou
 
 account
   .command('delete')
-  .description('Permanently delete your account and all cloud data')
+  .description('Permanently delete your account, cloud data, and login')
   .option('--confirm', 'Skip interactive prompt (Node 25 workaround)')
   .action(async (options) => {
     try {
@@ -766,7 +766,7 @@ program
 
 program
   .command('telemetry [action]')
-  .description('Anonymous usage telemetry: `on`, `off`, or `status` (default)')
+  .description('Anonymous usage telemetry (off by default): `on`, `off`, or `status`')
   .action(async (action) => {
     try {
       await telemetryCommand(action || 'status');
@@ -778,8 +778,8 @@ program
 
 program.hook('postAction', async (thisCommand, actionCommand) => {
   await checkForUpdate();
-  // Anonymous, opt-out usage event. postAction already awaits a network call
-  // (checkForUpdate), so this adds no perceived latency; no-op without a key.
+  // Anonymous, opt-in usage event. postAction already awaits a network call
+  // (checkForUpdate), so this adds no perceived latency; no-op unless opted in.
   try { await track('cli_command', { command: actionCommand?.name?.() || 'unknown' }); } catch {}
   // Local twin (events.jsonl): command name only, so `memoir recall`/`why`
   // reads are visible next to the writes and syncs already logged there.
